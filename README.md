@@ -134,6 +134,7 @@ ga-rlo doctor --profile remote --work-repo ../well_used_gemini
 | `ops/rlo/guard.sh` | `python -m rlo.hooks --mode enforce`, fail closed: no venv (and install fails), no model, nonzero exit, no new record line, non-JSON output, empty input -> deny. No clock override. Record: `~/.rlo/<name>.jsonl` |
 | `ops/rlo/model.json` | rlo's start model + the fields W1 really used + session plumbing: `ToolSearch`, `ReadNotifications`, `mcp__github__issue_read` (read); `mcp__github__add_issue_comment`, `mcp__claude-code-remote__send_message` (external, granted) |
 | `ops/rlo/GUARD.md` | Ownership, grants, fail-closed list. Tells the worker to post every guard deny verbatim on its channel, and that after an idle gap one read-only call clears a D |
+| `ops/rlo/PROMPT.md` | The worker rules to paste into the session's start prompt (CMD-GR4): when a deny ends with `-- react:`, do that alternative once; when `escalate` is true, post the deny verbatim on the channel and go on with other work. A deny without a react line (older rlo) is posted too |
 
 - **ga-rlo never commits or pushes these files** (BD-196: an AI may not change another session's guard). It prints the
   `git` commands for a human, and the ownership rows that give the hub `.claude/*` and `ops/rlo/*`.
@@ -145,8 +146,11 @@ ga-rlo doctor --profile remote --work-repo ../well_used_gemini
   - fail closed: empty input, garbage input, missing model, broken model, no venv with a failing install;
   - rlo 0.5.1 itself (without the wrapper): empty and garbage input are denied (`rlo hook input error`);
   - the D after an idle gap carries rlo's stale hint.
+- **Substitutes (CMD-GR4, rlo K11):** `model.json` gets `"substitutes": {"ReadNotifications": ["mcp__github__issue_read"]}`
+  (same purpose, already in the model; never for `WebFetch`, `Agent` or `create_session`; never an ungranted external
+  tool). It is written only when the installed rlo reads it: rlo 0.5.1 rejects the key and would deny every call.
 - **Moving an existing guard to the pinned rlo** (e.g. amp's W1 guard at `a152e14`): `ga-rlo upgrade-remote
-  --work-repo <checkout>` prints a `sed` for the `PIN=` line and the `git add/commit/push` for a human. ga-rlo edits
+  --work-repo <checkout>` prints a `sed -i.bak … && rm ….bak` for the `PIN=` line (GNU and macOS sed alike) and the `git add/commit/push` for a human. ga-rlo edits
   and runs nothing. The venv marker carries the PIN, so the worker's next session start reinstalls rlo.
 - The same cases give the same results on amp's v2 files.
 

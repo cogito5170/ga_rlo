@@ -149,9 +149,11 @@ class UpgradeRemoteTest(unittest.TestCase):
         self.assertEqual(rc, 0, err)
         self.assertEqual((self.amp / "ops/rlo/install.sh").read_text(), before)  # nothing edited
         cmds = [l.strip() for l in out.splitlines() if l.startswith("  ")]
-        self.assertTrue(cmds[0].startswith("sed -i "))
+        self.assertTrue(cmds[0].startswith("sed -i.bak "))  # GNU and BSD (macOS) sed alike (BD-203)
+        self.assertNotRegex(" ".join(cmds), r"sed -i '")  # never the GNU-only bare -i
         self.assertTrue(any(c.startswith("git -C ") and " push origin HEAD" in c for c in cmds))
         subprocess.run(cmds[0], shell=True, check=True)  # what the human's first command does
+        self.assertFalse((self.amp / "ops/rlo/install.sh.bak").exists())  # the backup is removed
         after = (self.amp / "ops/rlo/install.sh").read_text()
         self.assertEqual(after, before.replace(OLD, NEW))
         self.assertIn("AMP_RLO_VENV", after)  # only the PIN line moved

@@ -33,13 +33,20 @@ from . import _pins, preset
 
 GUARD_DIR = "ops/rlo"
 SETTINGS = ".claude/settings.json"
-FILES = ("install.sh", "guard.sh", "model.json", "GUARD.md")
+FILES = ("install.sh", "guard.sh", "model.json", "GUARD.md", "PROMPT.md")
 INSTALL_CMD = 'bash "$CLAUDE_PROJECT_DIR/ops/rlo/install.sh"'
 GUARD_CMD = 'bash "$CLAUDE_PROJECT_DIR/ops/rlo/guard.sh"'
 VENV_VAR = "GA_RLO_VENV"
 GRANTS = ("Bash", "mcp__github__add_issue_comment", "mcp__claude-code-remote__send_message")
 # S3: the sentence the worker reads; doctor checks it is there
 DENY_REPORT = "Post every guard deny verbatim on your channel"
+# CMD-GR4 S2: the in-turn ReAct rule (rlo CMD-K11: a deny ends with '-- react: {json}'); doctor checks it is there
+REACT_RULE = ("When a deny ends with '-- react:', do exactly that alternative once. When escalate is true, post the deny "
+              "verbatim on your channel and continue other work.")
+# CMD-GR4 S1: same-purpose substitutes for the session plumbing (operator-owned, rlo K11 action-model 'substitutes').
+# Only tools in the model may be named, and an external one only if granted; never a substitute for these:
+SUBSTITUTES = {"ReadNotifications": ["mcp__github__issue_read"]}
+NO_SUBSTITUTE = ("WebFetch", "Agent", "mcp__claude-code-remote__create_session")
 
 
 def _spec(name: str, risk: str, params: dict[str, Any], description: str) -> dict[str, Any]:
@@ -78,15 +85,49 @@ MEASURED_PARAMS = {
 MEASURED_SPECS = [_spec("Glob", "read", {"pattern": {"type": "string"}, "path": _opt("string")}, "Find files (read only).")]
 
 
-def model(name: str = "worker") -> dict[str, Any]:
-    """rlo's start model + W1's measured fields + plumbing. Always has every PLUMBING tool (S2)."""
+def substitutes_supported() -> bool:
+    """Does the installed rlo / action contract read an action-model with 'substitutes' (rlo K11)? rlo 0.5.1 does not:
+    it rejects the whole model, and a fail-closed guard would then deny every call. So the map is written only when
+    this is True (doctor also checks install.sh pins the same rlo)."""
+    try:
+        from action.spec import ActionModel
+
+        ActionModel.from_dict({"schema": "action-model/1", "version": "probe", "specs": [], "substitutes": {}})
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def model(name: str = "worker", substitutes: bool | None = None) -> dict[str, Any]:
+    """rlo's start model + W1's measured fields + plumbing. Always has every PLUMBING tool (S2).
+    With ``substitutes`` (default: when the installed rlo reads them), the SUBSTITUTES map (CMD-GR4 S1)."""
     m = json.loads(preset.packaged_model().read_text(encoding="utf-8"))
     for s in m["specs"]:
         s["params"].update(MEASURED_PARAMS.get(s["name"], {}))
     have = {s["name"] for s in m["specs"]}
     m["specs"] += [json.loads(json.dumps(s)) for s in MEASURED_SPECS + PLUMBING if s["name"] not in have]
     m["version"] = f"ga-rlo-remote-1:{name}"
+    if substitutes if substitutes is not None else substitutes_supported():
+        m["substitutes"] = json.loads(json.dumps(SUBSTITUTES))
     return m
+
+
+def substitute_problems(m: dict[str, Any]) -> list[str]:
+    """A substitutes map may only name tools in the model (external ones granted) and never serve NO_SUBSTITUTE."""
+    out = []
+    subs = m.get("substitutes", {})
+    if not isinstance(subs, dict):
+        return ["model.json: substitutes is not an object"]
+    specs = {s["name"]: s for s in m.get("specs", [])}
+    for tool, alts in subs.items():
+        if tool in NO_SUBSTITUTE:
+            out.append(f"model.json: a substitute for {tool} (none is allowed: it must be reported, not worked around)")
+        for alt in alts if isinstance(alts, list) else [alts]:
+            if alt not in specs:
+                out.append(f"model.json: substitute {alt!r} for {tool} is not in the model")
+            elif specs[alt].get("risk") in ("external", "irreversible") and alt not in GRANTS:
+                out.append(f"model.json: substitute {alt!r} for {tool} is {specs[alt]['risk']} and not granted")
+    return out
 
 
 INSTALL_SH = """#!/usr/bin/env bash
@@ -166,12 +207,22 @@ The middle verification line (METHOD §4c 7) for the `{name}` remote worker sess
 
 ## For the worker session
 
-- **{deny_report}** (the issue your hub reads). Paste the deny reason as it is, then wait for the hub. Do not ask
-  only in your own chat: the hub does not see it.
+{worker_rules}
+"""
+
+WORKER_RULES = """- **{react_rule}**
+- If a deny has no `-- react:` line (an older rlo), the alternative is: {deny_report} (the issue your hub reads),
+  then go on with other work. Do not ask only in your own chat: the hub does not see it.
 - After an idle gap (over about 10 minutes) the first Bash can be denied with D: the guard no longer knows your run's
   health. Make one read-only call (for example `Read` of a file you need) and retry.
 - Do not edit `.claude/` or `ops/rlo/`. Changes go through the hub.
 """
+
+PROMPT_MD = """# Guard rules for the {name} session (paste into the session's start prompt)
+
+Every tool call you make goes through the rlo guard (`ops/rlo/GUARD.md`). It can deny a call; it never allows more.
+
+{worker_rules}"""
 
 
 def files(name: str = "worker") -> dict[str, str]:
@@ -180,12 +231,14 @@ def files(name: str = "worker") -> dict[str, str]:
         raise ValueError(f"name {name!r}: letters, digits, _ . - only")
     _, _, url, sha = _pins.PINS["rlo"]
     grants = " ".join(f"--grant {shlex.quote(g)}" for g in GRANTS)
+    rules = WORKER_RULES.format(react_rule=REACT_RULE, deny_report=DENY_REPORT)
     return {
         f"{GUARD_DIR}/install.sh": INSTALL_SH.format(sha=sha, url=url, venv_var=VENV_VAR),
         f"{GUARD_DIR}/guard.sh": GUARD_SH.format(name=name, venv_var=VENV_VAR, grants=grants),
         f"{GUARD_DIR}/model.json": json.dumps(model(name), ensure_ascii=False, indent=1) + "\n",
+        f"{GUARD_DIR}/PROMPT.md": PROMPT_MD.format(name=name, worker_rules=rules),
         f"{GUARD_DIR}/GUARD.md": GUARD_MD.format(
-            name=name, sha7=sha[:7], venv_var=VENV_VAR, deny_report=DENY_REPORT,
+            name=name, sha7=sha[:7], venv_var=VENV_VAR, worker_rules=rules,
             grants=", ".join(f"`{g}`" for g in GRANTS), plumbing=", ".join(f"`{s['name']}`" for s in PLUMBING)),
     }
 
@@ -435,6 +488,10 @@ def problems(repo: str | Path) -> list[str]:
             out.append(f"{f}: runs git (the guard must not change the repo)")
     try:
         mdl = json.loads((repo / GUARD_DIR / "model.json").read_text(encoding="utf-8"))
+        out += substitute_problems(mdl)
+        if "substitutes" in mdl and not substitutes_supported():
+            out.append("model.json: has substitutes, which the installed rlo cannot read (every call would be denied)")
+            return out
         preset.load_model(repo / GUARD_DIR / "model.json")
         specs = {s["name"]: s for s in mdl["specs"]}
         for p in PLUMBING:
@@ -445,8 +502,12 @@ def problems(repo: str | Path) -> list[str]:
                 out.append(f"model.json: {p['name']} risk {got.get('risk')!r}, not {p['risk']!r}")
     except Exception as e:  # noqa: BLE001
         out.append(f"model.json is not a readable action-model/1 ({type(e).__name__})")
-    if DENY_REPORT not in (repo / GUARD_DIR / "GUARD.md").read_text(encoding="utf-8"):
-        out.append(f"GUARD.md: the deny-report rule ({DENY_REPORT!r}) is missing (S3)")
+    for f in ("GUARD.md", "PROMPT.md"):
+        text = (repo / GUARD_DIR / f).read_text(encoding="utf-8")
+        if DENY_REPORT not in text:
+            out.append(f"{f}: the deny-report rule ({DENY_REPORT!r}) is missing (GR2 S3)")
+        if REACT_RULE not in text:
+            out.append(f"{f}: the ReAct rule is missing (GR4 S2)")
     return out
 
 
@@ -473,7 +534,8 @@ def upgrade_commands(repo: str | Path, install_rel: str = f"{GUARD_DIR}/install.
     q = shlex.quote(str(repo))
     f = shlex.quote(str(repo / install_rel))
     return old, [
-        f"sed -i 's/^PIN=\"{old}\"$/PIN=\"{new}\"/' {f}",
+        # -i.bak works on GNU and BSD (macOS) sed alike; a bare -i is GNU-only (BD-203)
+        f"sed -i.bak 's/^PIN=\"{old}\"$/PIN=\"{new}\"/' {f} && rm {shlex.quote(str(repo / install_rel) + '.bak')}",
         f"grep -n '^PIN=' {f}",
         f"git -C {q} add {shlex.quote(install_rel)}",
         f"git -C {q} commit -m {shlex.quote(f'rlo guard: rlo-sdk 0.5.1 ({new[:7]}), was {old[:7]}')}",

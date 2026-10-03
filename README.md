@@ -17,7 +17,7 @@ ga-rlo doctor --install-only        # 빈 디렉터리에서도 돈다
 
 | 배포 | 커밋 | 무엇 |
 |---|---|---|
-| `ga-sdk` | `645f8da` | GA17 통합 머리(`runner.guards`, BD-165) |
+| `ga-sdk` | `af904fe` | GA19: `guard_summary` state lines, `report/2` forms (GA17 `runner.guards` before it) |
 | `rlo-sdk[sensor]` | `a152e14` | stage-8. 훅 판정에 Sensor 가 필요하다 |
 
 ## 명령
@@ -108,7 +108,36 @@ ga-rlo doctor && ga-rlo send CMD-W1.md
   - 허브 안에서 헤드리스 턴을 여는 길(`claude -p`)은 거기서 막힐 수 있다(BD-154 · 160). 막히면 ga 는 `refused:…` 로 기록하고 게이트 6 으로 묻는다. 다른 길로 다시 시도하지 않는다.
   - ga_rlo 의 가드는 그 검사를 대신하지도, 피해 가지도 않는다.
 - git 에서 받는 설치(`pip install git+…`)도 그 검사에 걸릴 수 있다. 사람이 허락한 뒤 설치한다.
-- 원격 작업 세션에 rlo 가드를 작업 저장소의 프로젝트 설정(`.claude/settings.json`)으로 거는 꼴(`ga-rlo init --profile remote`)은 CMD-GR2 에서 정한다. 지금은 아무것도 쓰지 않고 멈춘다.
+- A remote worker session gets its rlo guard as project settings in its work repo: see **Remote profile** below.
+
+## Remote profile (CMD-GR2)
+
+For a worker that runs as a remote (cloud) session, the guard cannot go into a turn's own settings: the hub does not
+start the turn. It goes into the work repo's project settings instead. Generalised from the W1 guard that ran on a
+real remote session (amp `344a604`, BD-183/189/193/194).
+
+```sh
+ga-rlo init --profile remote --work-repo ../well_used_gemini --name W1
+ga-rlo doctor --profile remote --work-repo ../well_used_gemini
+```
+
+| File | What it does |
+|---|---|
+| `.claude/settings.json` | SessionStart runs `ops/rlo/install.sh`; PreToolUse `*` runs `ops/rlo/guard.sh`. Other keys and hooks are kept |
+| `ops/rlo/install.sh` | Installs pinned `rlo-sdk[sensor]` into `$GA_RLO_VENV` (default `~/.cache/ga-rlo-venv`). Idempotent |
+| `ops/rlo/guard.sh` | `python -m rlo.hooks --mode enforce`, fail closed: no venv (and install fails), no model, nonzero exit, no new record line, non-JSON output, empty input -> deny. No clock override. Record: `~/.rlo/<name>.jsonl` |
+| `ops/rlo/model.json` | rlo's start model + the fields W1 really used + session plumbing: `ToolSearch`, `ReadNotifications`, `mcp__github__issue_read` (read); `mcp__github__add_issue_comment`, `mcp__claude-code-remote__send_message` (external, granted) |
+| `ops/rlo/GUARD.md` | Ownership, grants, fail-closed list. Tells the worker to post every guard deny verbatim on its channel, and that after an idle gap one read-only call clears a D |
+
+- **ga-rlo never commits or pushes these files** (BD-196: an AI may not change another session's guard). It prints the
+  `git` commands for a human, and the ownership rows that give the hub `.claude/*` and `ops/rlo/*`.
+- `doctor --profile remote` checks the files against the preset, then runs the repo's `guard.sh` under bash on
+  fresh-time transcripts (`--venv` names a venv with rlo; default: the current one):
+  - pass: Bash, Read, the five plumbing tools, and Bash after a 2-hour idle gap followed by a Read;
+  - A1: `WebFetch`, `mcp__claude-code-remote__create_session`;
+  - D: Bash right after a 2-hour idle gap;
+  - fail closed: empty input, garbage input, missing model, broken model, no venv with a failing install.
+- The same cases give the same results on amp's v2 files.
 
 ## 시험
 
@@ -119,4 +148,5 @@ python -m unittest discover -s tests      # 또는 pytest
 - 실제 모형 호출 · 네트워크가 없다. Runner 는 ga 의 진짜 헤드리스 Runner 이고, `claude` 자리에 가짜(`tests/fake_claude.py`)를 둔다.
 - 가짜는 Claude Code 처럼 턴 전용 설정의 PreToolUse 훅을 실제로 부른다. 지금 시각의 transcript 를 함께 쓴다.
 - `test_loop`(§4 2): init → 막힐 도구(WebFetch)가 든 가짜 턴 → tick. 회차 기록에 `A1` 거부 수가 남는지 본다.
+- `test_remote` (CMD-GR2): the remote profile's files, its S4 replay, and mutations (plumbing dropped, each deny path turned into allow, shadow, a widened grant, a clock override, git in the guard files or run by ga-rlo).
 - `test_mutations`(§4 3): 가드 빠짐 · shadow · grant 넓어짐 · 빠짐 · 모형 넓어짐 · matcher 좁아짐 · 사람 설정 · 허브 세션 설정에 가드가 들어가면 doctor 가 잡는지 본다.

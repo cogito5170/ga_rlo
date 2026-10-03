@@ -226,3 +226,21 @@ def render(ok: bool, checks: list[Check], as_json: bool = False) -> str:
     lines = [f"{'ok  ' if c.ok else 'FAIL'}  {c.check:{w}}  {c.detail}" for c in checks]
     lines.append("doctor: ok" if ok else f"doctor: FAIL ({sum(not c.ok for c in checks)} of {len(checks)})")
     return "\n".join(lines)
+
+
+def run_remote(work_repo: str | Path = ".", venv: str | None = None) -> tuple[bool, list[Check]]:
+    """Remote profile (CMD-GR2 S4): the work repo's guard files as generated, and replayed as Claude Code runs them."""
+    import sys
+
+    from . import remote
+
+    repo = Path(work_repo).resolve()
+    checks = pin_checks()
+    probs = remote.problems(repo)
+    checks.append(Check("remote.preset", not probs, "; ".join(probs) if probs else
+                        "settings hooks · enforce · grants · no clock override · no git · plumbing · deny-report rule"))
+    if not any(p.endswith(" is missing") for p in probs):  # no files, nothing to replay
+        for name, ok, detail in remote.replay(repo, venv or sys.prefix):
+            checks.append(Check(f"remote.replay.{name}", ok, detail))
+    checks += person_settings(None)
+    return all(c.ok for c in checks), checks

@@ -110,8 +110,9 @@ def run(*, directory: str | Path, profile: str = "local", force: bool = False, *
     if profile not in PROFILES:
         raise InitError(f"--profile {profile!r}: one of {PROFILES}")
     if profile == "remote":
-        raise InitError("profile remote (rlo guard in the work repository's project settings, GA_RLO.md §7) is not "
-                        "built yet: its shape comes with CMD-GR2. Nothing was written.")
+        return run_remote(work_repo=kw.get("work_repo"), name=kw.get("name") or "worker", force=force)
+    kw.pop("work_repo", None)
+    kw.pop("name", None)
     base = Path(directory).resolve()
     cfg_path = base / "ga.json"
     if cfg_path.exists() and not force:
@@ -125,3 +126,16 @@ def run(*, directory: str | Path, profile: str = "local", force: bool = False, *
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
     cfg_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return {"config": str(cfg_path), "model": str(model_path), "permit": permit_command(raw)}
+
+
+def run_remote(*, work_repo: str | Path | None, name: str = "worker", force: bool = False) -> dict[str, Any]:
+    """Remote profile (CMD-GR2): the guard as project settings in the work repo. Writes files, never runs git (S5)."""
+    from . import remote
+
+    if not work_repo:
+        raise InitError("--profile remote needs --work-repo PATH (a checkout of the worker's repository)")
+    try:
+        out = remote.write(work_repo, name=name, force=force)
+    except (OSError, ValueError) as e:
+        raise InitError(str(e)) from e
+    return dict(out, profile="remote")

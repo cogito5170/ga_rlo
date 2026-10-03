@@ -5,5 +5,6 @@
     init     G3  `ga-rlo init`
     doctor   G4  `ga-rlo doctor`
     cli      G5  `ga-rlo` 한 입구
+    remote   CMD-GR2  the guard as project settings for a remote worker (`init/doctor --profile remote`)
 """
-__version__ = "0.1.0"
+__version__ = "0.2.0"

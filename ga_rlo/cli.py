@@ -112,8 +112,11 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--dir", default=None, help="설정을 쓸 디렉터리(기본: --config 의 디렉터리)")
     p.add_argument("--profile", default="local", choices=("local", "remote"))
     p.add_argument("--hub", default="hub")
-    p.add_argument("--repo", action="append", default=[], metavar="NAME=PATH", required=True)
-    p.add_argument("--session", action="append", default=[], metavar="NAME:PREFIX:BRANCH:REPO[,REPO]", required=True)
+    p.add_argument("--repo", action="append", default=[], metavar="NAME=PATH", help="local profile (one or more)")
+    p.add_argument("--session", action="append", default=[], metavar="NAME:PREFIX:BRANCH:REPO[,REPO]",
+                   help="local profile (one or more)")
+    p.add_argument("--work-repo", default=None, help="remote profile: the worker's repository checkout")
+    p.add_argument("--name", default="worker", help="remote profile: the worker session's name (record file name)")
     p.add_argument("--integration-branch", default="integration")
     p.add_argument("--runner", default="headless", choices=("headless", "agent_sdk"))
     p.add_argument("--model", default=None)
@@ -125,6 +128,9 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--force", action="store_true")
     p = sub.add_parser("doctor", help="G4: 실행 전 점검(어긋나면 exit 1)")
     p.add_argument("--install-only", action="store_true", help="설정 없이 설치만 본다")
+    p.add_argument("--profile", default="local", choices=("local", "remote"))
+    p.add_argument("--work-repo", default=".", help="remote profile: the worker's repository checkout")
+    p.add_argument("--venv", default=None, help="remote profile: a venv with rlo installed (default: this one)")
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("evidence", help="G2: 턴마다 rlo 의 수와 라벨")
     p.add_argument("--json", action="store_true")
@@ -137,6 +143,26 @@ def _parser() -> argparse.ArgumentParser:
 def cmd_init(a) -> int:
     from . import init
 
+    if a.profile == "remote":
+        try:
+            out = init.run(directory=".", profile="remote", force=a.force, work_repo=a.work_repo, name=a.name)
+        except init.InitError as e:
+            print(f"ga-rlo init: {e}", file=sys.stderr)
+            return 2
+        for rel in out["written"]:
+            print(f"wrote {Path(out['repo']) / rel}")
+        print("\nga-rlo does not commit or push guard files (an AI may not change another session's guard, BD-196).")
+        print("A human reviews them, then runs:")
+        for c in out["commands"]:
+            print(f"  {c}")
+        print("Give the hub ownership of these paths in its ga.json:")
+        for row in out["ownership"]:
+            print(f"  {json.dumps(row)}")
+        print("Then: ga-rlo doctor --profile remote --work-repo <checkout>")
+        return 0
+    if not a.repo or not a.session:
+        print("ga-rlo init: the local profile needs --repo and --session", file=sys.stderr)
+        return 2
     try:
         repos = dict(init.parse_repo(r) for r in a.repo)
         sessions = dict(init.parse_session(s) for s in a.session)
@@ -160,7 +186,10 @@ def cmd_init(a) -> int:
 def cmd_doctor(a) -> int:
     from . import doctor
 
-    ok, checks = doctor.run(a.config, a.ga_dir, install_only=a.install_only)
+    if a.profile == "remote":
+        ok, checks = doctor.run_remote(a.work_repo, a.venv)
+    else:
+        ok, checks = doctor.run(a.config, a.ga_dir, install_only=a.install_only)
     print(doctor.render(ok, checks, a.json))
     return 0 if ok else 1
 

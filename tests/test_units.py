@@ -37,7 +37,7 @@ class PinsTest(unittest.TestCase):
             self.assertRegex(pin[3], r"^[0-9a-f]{40}$")
 
     def test_the_pins_are_the_ones_in_the_spec(self):
-        self.assertEqual(_pins.PINS["ga"][3], "645f8da97b1f0f649edc1fa70ed7dc06154632be")
+        self.assertEqual(_pins.PINS["ga"][3], "af904fe7fe1a0da2ef817ca981422040cccc0718")
         self.assertEqual(_pins.PINS["rlo"][3], "a152e14bc84dc282f66bb3426a12a70934fc530d")
         self.assertEqual(_pins.PINS["rlo"][1], ("sensor",))
 

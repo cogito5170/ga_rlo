@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ga-rlo"
 version = "0.4.0"
-description = "ga-SDK 와 rlo-SDK 를 한 입구로 -- 결합층(두 SDK 를 고정 판으로 의존하고 잇는 코드만 가진다)"
+description = "FROZEN at 0.4.0: moved into ga-SDK as `ga rlo` (pip install ga-sdk). ga-SDK and rlo-SDK as one entry."
 readme = "README.md"
 requires-python = ">=3.10"
 # 판 목록의 원본은 ga_rlo/_pins.py 다. 이 목록은 그것과 뜻이 같아야 한다(tests/test_pins.py).

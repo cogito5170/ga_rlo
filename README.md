@@ -1,4 +1,24 @@
-# ga_rlo
+# ga_rlo -- frozen (moved into ga-SDK as `ga rlo`)
+
+> **This repository is frozen at 0.4.0** (CMD-GR5, GA_UNIFIED U2, BD-206: one ga). Its code now lives in ga-SDK as
+> the `ga.rlo` package, and every command works the same under `ga rlo`:
+>
+> ```sh
+> pip install "ga-sdk @ git+https://github.com/cogito5170/ga-SDK@<sha>"   # brings rlo-sdk[sensor] with it
+> ga rlo init ...            # was: ga-rlo init ...
+> ga rlo doctor ...          # was: ga-rlo doctor ...
+> ga rlo evidence | preset | upgrade-remote | hooks ...
+> ga permit | tick | send ...   # ga's own commands (ga-rlo passed them through)
+> ```
+>
+> - Generated files are the same, except the local guard command, which is now `python -m ga.rlo.hook`
+>   (was `python -m ga_rlo.hook`). For a hub set up with ga_rlo, change `ga_rlo.hook` to `ga.rlo.hook` in
+>   `ga.json`'s `runner.guards[].command`, then run `ga rlo doctor`. Without ga_rlo installed, the old command
+>   cannot run and doctor fails (closing side). Remote guards (`ops/rlo/`) need no change.
+> - No new features land here. Issues and changes go to ga-SDK (`ga/rlo/*`, `tests/test_rlo/*`).
+> - The text below describes ga_rlo 0.4.0 as it was.
+
+## ga_rlo 0.4.0 (as frozen)
 
 ga-SDK 와 rlo-SDK 를 한 입구로 묶는다. **ga 가 일을 굴리고 기록 · 판정한다. rlo 가 그 안의 모형 턴을 지킨다. 둘을 한 번에 설치하고 한 번에 설정한다.** 명세는 baseline `GA_RLO.md`(ga_rlo-1 rev 1, BD-164)다.
 

@@ -38,7 +38,7 @@ class PinsTest(unittest.TestCase):
 
     def test_the_pins_are_the_ones_in_the_spec(self):
         self.assertEqual(_pins.PINS["ga"][3], "af904fe7fe1a0da2ef817ca981422040cccc0718")
-        self.assertEqual(_pins.PINS["rlo"][3], "a152e14bc84dc282f66bb3426a12a70934fc530d")
+        self.assertEqual(_pins.PINS["rlo"][3], "9af276f4e4864274a6414794aad55a8c1e5bcf19")
         self.assertEqual(_pins.PINS["rlo"][1], ("sensor",))
 
     def test_installed_metadata_is_the_pin_list(self):

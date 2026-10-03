@@ -2,11 +2,12 @@
 
     ga-rlo init     --hub H --repo N=PATH … --session N:P:BRANCH:REPOS …   G3: ga.json + rlo 모형 (허락은 출력만)
     ga-rlo doctor   [--install-only] [--json]                               G4: 실행 전 점검 (어긋나면 exit 1)
-    ga-rlo evidence [--json]                                                G2: 턴마다 rlo 의 수와 라벨
+    ga-rlo evidence [--json]                                                G2: per turn, ga's guard evidence (counts, labels, Sensor state)
     ga-rlo preset   [--model PATH]                                          G1: runner.guards 항목 하나(JSON)
+    ga-rlo upgrade-remote [--work-repo PATH]                                prints how to move a remote guard to the pinned rlo
 
     ga-rlo <ga 하위 명령> …     tick · send · answer · permit · post · prompt · check · review · render · setup · sandbox
-                                (그대로 ga 로. 턴을 열 수 있는 send · tick · answer 는 앞뒤로 증거 다리를 돈다)
+                                (그대로 ga 로)
     ga-rlo hooks …              python -m rlo.hooks … 그대로. install-hook · uninstall-hook 은 --settings 가 있어야 하고
                                 사람의 설정(~/.claude · CLAUDE_CONFIG_DIR)은 거절한다(P4)
 
@@ -21,8 +22,7 @@ import sys
 from pathlib import Path
 
 GA_COMMANDS = ("tick", "setup", "sandbox", "post", "send", "review", "permit", "answer", "prompt", "check", "render")
-TURN_COMMANDS = ("send", "tick", "answer")
-OWN = ("init", "doctor", "evidence", "preset")
+OWN = ("init", "doctor", "evidence", "preset", "upgrade-remote")
 GLOBAL = ("--config", "--ga-dir")
 
 
@@ -73,29 +73,10 @@ def hooks(rest: list[str]) -> int:
 
 
 def passthrough(argv: list[str], opts: dict[str, str], cmd: str) -> int:
+    """ga's own command, unchanged. rlo's state reaches ga's turn evidence through the record (CMD-GR3 S3)."""
     from ga.__main__ import main as ga_main
 
-    config = Path(opts.get("--config", "ga.json"))
-    bridge = snap = None
-    if cmd in TURN_COMMANDS and config.exists():
-        try:
-            from .bridge import Bridge
-
-            bridge = Bridge(config, opts.get("--ga-dir"))
-            snap = bridge.before()
-        except Exception as e:  # noqa: BLE001 -- 다리가 못 서도 ga 명령은 그대로 돈다
-            print(f"ga-rlo: evidence bridge not set up ({type(e).__name__})", file=sys.stderr)
-            bridge = None
-    try:
-        return ga_main(argv)
-    finally:
-        if bridge is not None:
-            try:
-                rows = bridge.after(snap)
-                if rows:
-                    print(f"ga-rlo: rlo evidence for {len(rows)} turn(s) -> {bridge.out}", file=sys.stderr)
-            except Exception as e:  # noqa: BLE001
-                print(f"ga-rlo: evidence bridge failed ({type(e).__name__})", file=sys.stderr)
+    return ga_main(argv)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -136,6 +117,9 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("preset", help="G1: runner.guards 항목 하나")
     p.add_argument("--model", default=None, help="모형 경로(기본: <설정 디렉터리>/.ga-rlo/cc_tools_model.json)")
+    p = sub.add_parser("upgrade-remote", help="print the commands that move a remote guard's install.sh to the pinned rlo")
+    p.add_argument("--work-repo", default=".")
+    p.add_argument("--install-sh", default="ops/rlo/install.sh", help="path inside the work repo")
     sub.add_parser("hooks", help="python -m rlo.hooks … 그대로", add_help=False)
     return ap
 
@@ -194,22 +178,53 @@ def cmd_doctor(a) -> int:
     return 0 if ok else 1
 
 
-def cmd_evidence(a) -> int:
+def evidence_rows(config: str, ga_dir: str | None) -> list[dict]:
+    """Per turn: ga's own guard evidence (counts, deny labels, Sensor state). Old runs: the retired side file."""
     from .bridge import read_evidence
 
-    rows = read_evidence(a.config)
+    state = (Path(ga_dir) if ga_dir else Path(config).resolve().parent / ".ga") / "state.json"
+    rows = []
+    if state.exists():
+        for i, t in enumerate(json.loads(state.read_text(encoding="utf-8")).get("turns", [])):
+            for g in t.get("guards", []):
+                rows.append({"turn": i, "session": t["session"], "directive": t.get("directive"), "rev": t.get("rev"),
+                             "guard": g, "state": g.get("state")})
+    return rows or read_evidence(config)
+
+
+def cmd_evidence(a) -> int:
+    rows = evidence_rows(a.config, a.ga_dir)
     if a.json:
         print(json.dumps(rows, ensure_ascii=False, indent=1))
         return 0
     if not rows:
-        print("no rlo evidence yet (it is written when ga-rlo send · tick · answer runs a turn)")
+        print("no guard evidence yet (ga writes it when a turn runs with runner.guards)")
     for r in rows:
         g = r.get("guard") or {}
         st = r.get("state")
         print(f"turn {r['turn']} {r['session']} {r.get('directive')} rev {r.get('rev')}: "
               f"allow {g.get('allow', '-')} deny {g.get('deny', '-')} errors {g.get('errors', '-')} "
-              f"labels {','.join(g.get('labels', [])) or '-'} missing {','.join(g.get('missing', [])) or '-'} | "
+              f"labels {','.join(g.get('labels', [])) or '-'} | "
               + (", ".join(f"{k}={v}" for k, v in st.items()) if st else "state unknown"))
+    return 0
+
+
+def cmd_upgrade_remote(a) -> int:
+    from . import remote
+
+    try:
+        old, cmds = remote.upgrade_commands(a.work_repo, a.install_sh)
+    except (OSError, ValueError) as e:
+        print(f"ga-rlo upgrade-remote: {e}", file=sys.stderr)
+        return 2
+    if not cmds:
+        print(f"already at the pinned rlo-sdk ({old[:7]}): nothing to do")
+        return 0
+    print(f"{a.install_sh} pins rlo-sdk {old[:7]}; ga_rlo pins {remote._pins.PINS['rlo'][3][:7]}.")
+    print("ga-rlo does not edit, commit or push a guard (BD-196). A human runs:")
+    for c in cmds:
+        print(f"  {c}")
+    print("The venv marker carries the PIN, so the worker's next session start reinstalls rlo.")
     return 0
 
 
@@ -232,7 +247,8 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd is None:
         _parser().print_help()
         return 0
-    return {"init": cmd_init, "doctor": cmd_doctor, "evidence": cmd_evidence, "preset": cmd_preset}[a.cmd](a)
+    return {"init": cmd_init, "doctor": cmd_doctor, "evidence": cmd_evidence, "preset": cmd_preset,
+            "upgrade-remote": cmd_upgrade_remote}[a.cmd](a)
 
 
 if __name__ == "__main__":

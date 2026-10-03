@@ -287,6 +287,7 @@ PLUMBING_CALLS = [
 DENY_A1 = [("WebFetch", {"url": "https://example.invalid/"}),
            ("mcp__claude-code-remote__create_session", {"prompt": "p"})]
 IDLE_MS = 2 * 3600 * 1000
+STALE_HINT_MARK = "hint: the decision state is stale"  # rlo 0.5.1 rlo.hooks.STALE_HINT
 
 
 @dataclass
@@ -297,6 +298,8 @@ class Case:
     want: str  # "pass" | "A1" | "D" | "fail-closed"
     stdin: str | None = None  # raw stdin instead of the hook input
     setup: str = ""  # "no-model" | "bad-model" | "no-venv"
+    direct: bool = False  # call rlo.hooks itself, not guard.sh (rlo 0.5.1 closes on malformed input on its own)
+    hint: bool = False  # the deny must carry rlo's stale-only hint (rlo 0.5.1)
 
 
 def cases() -> list[Case]:
@@ -306,13 +309,15 @@ def cases() -> list[Case]:
     out += [Case(f"plumbing {t}", ok, (t, i), "pass") for t, i in PLUMBING_CALLS]
     out += [Case(f"A1 {t}", ok, (t, i), "A1") for t, i in DENY_A1]
     gap = [(BASH[0], BASH[1], True, IDLE_MS)]
-    out += [Case("Bash after 2h idle", gap, BASH, "D"),
+    out += [Case("Bash after 2h idle", gap, BASH, "D", hint=True),
             Case("Bash after 2h idle, then Read", gap + [(READ[0], READ[1], True, 2000)], BASH, "pass")]
     out += [Case("empty stdin", [], BASH, "fail-closed", stdin=""),
             Case("garbage stdin", [], BASH, "fail-closed", stdin="not json"),
             Case("model missing", ok, BASH, "fail-closed", setup="no-model"),
             Case("model broken", ok, BASH, "fail-closed", setup="bad-model"),
-            Case("no venv, install fails", ok, BASH, "fail-closed", setup="no-venv")]
+            Case("no venv, install fails", ok, BASH, "fail-closed", setup="no-venv"),
+            Case("rlo itself: empty stdin", [], BASH, "input-error", stdin="", direct=True),
+            Case("rlo itself: garbage stdin", [], BASH, "input-error", stdin="not json", direct=True)]
     return out
 
 
@@ -352,8 +357,12 @@ def replay(repo: str | Path, venv: str | Path, *, guard_rel: str = f"{GUARD_DIR}
                     "tool_input": c.call[1], "tool_use_id": "current"}
             env = {k: os.environ[k] for k in ("PATH", "LANG", "LC_ALL") if k in os.environ}
             env.update(HOME=str(home), CLAUDE_PROJECT_DIR=str(project), **{var: v for var in venv_vars})
+            argv = ["bash", str(project / guard_rel)]
+            if c.direct:  # rlo.hooks as guard.sh calls it, without the wrapper's own checks
+                argv = [str(Path(v) / "bin" / "python"), "-m", "rlo.hooks", "--model", str(project / model_rel),
+                        "--mode", "enforce", *[x for g in GRANTS for x in ("--grant", g)], "--record", str(home / "rec.jsonl")]
             try:
-                p = subprocess.run(["bash", str(project / guard_rel)], input=json.dumps(data) if c.stdin is None else c.stdin,
+                p = subprocess.run(argv, input=json.dumps(data) if c.stdin is None else c.stdin,
                                    capture_output=True, text=True, env=env, timeout=300)
             except (OSError, subprocess.TimeoutExpired) as e:
                 res.append((c.name, False, type(e).__name__))
@@ -371,12 +380,16 @@ def replay(repo: str | Path, venv: str | Path, *, guard_rel: str = f"{GUARD_DIR}
                 ok, detail = False, "the guard said allow (P3)"
             elif c.want == "pass":
                 ok, detail = dec is None, "not blocked" if dec is None else f"blocked: {why[:90]}"
-            elif c.want == "fail-closed":
-                ok = dec == "deny" and "fail closed" in why
+            elif c.want in ("fail-closed", "input-error"):
+                marks = ("rlo hook input error",) if c.want == "input-error" else ("fail closed", "rlo hook input error")
+                ok = dec == "deny" and any(m in why for m in marks)
                 detail = why[:90] if dec else "not denied: a fail-closed path lets the call through"
             else:
                 ok = dec == "deny" and f"({c.want})" in why
                 detail = f"denied {c.want}" if ok else f"not denied by {c.want}: {(why or 'no decision')[:80]}"
+                if ok and c.hint:
+                    ok = STALE_HINT_MARK in why
+                    detail += " with the stale hint" if ok else " but without the stale hint (rlo < 0.5.1?)"
             res.append((c.name, ok, detail))
     return res
 
@@ -413,6 +426,10 @@ def problems(repo: str | Path) -> list[str]:
         out.append(f"guard.sh: grants {sorted(grants)} are not {sorted(GRANTS)}")
     if "--now-ms" in guard:
         out.append("guard.sh: --now-ms (a clock override) is not allowed")
+    pin = pin_of(repo / GUARD_DIR / "install.sh")
+    if pin != _pins.PINS["rlo"][3]:
+        out.append(f"install.sh: PIN {pin!r} is not the pinned rlo-sdk {_pins.PINS['rlo'][3][:7]} "
+                   "(ga-rlo upgrade-remote prints how to move it)")
     for f in ("install.sh", "guard.sh"):
         if re.search(r"(^|[;&|`(\s])git\s", (repo / GUARD_DIR / f).read_text(encoding="utf-8"), re.M):
             out.append(f"{f}: runs git (the guard must not change the repo)")
@@ -431,3 +448,34 @@ def problems(repo: str | Path) -> list[str]:
     if DENY_REPORT not in (repo / GUARD_DIR / "GUARD.md").read_text(encoding="utf-8"):
         out.append(f"GUARD.md: the deny-report rule ({DENY_REPORT!r}) is missing (S3)")
     return out
+
+
+# ------------------------------------------------------------------------------------------------ S4 moving a pin
+
+PIN_LINE = re.compile(r'^PIN="([0-9a-f]{7,40})"$', re.M)
+
+
+def pin_of(install_sh: Path) -> str | None:
+    m = PIN_LINE.search(install_sh.read_text(encoding="utf-8")) if install_sh.is_file() else None
+    return m.group(1) if m else None
+
+
+def upgrade_commands(repo: str | Path, install_rel: str = f"{GUARD_DIR}/install.sh") -> tuple[str | None, list[str]]:
+    """(current PIN, commands a human runs to move the guard's install.sh to the pinned rlo-sdk). ga-rlo runs none of
+    them (BD-196). The venv marker carries the PIN, so the worker's next SessionStart reinstalls."""
+    repo = Path(repo).resolve()
+    old = pin_of(repo / install_rel)
+    new = _pins.PINS["rlo"][3]
+    if old is None:
+        raise ValueError(f"{repo / install_rel}: no PIN=\"<sha>\" line")
+    if old == new:
+        return old, []
+    q = shlex.quote(str(repo))
+    f = shlex.quote(str(repo / install_rel))
+    return old, [
+        f"sed -i 's/^PIN=\"{old}\"$/PIN=\"{new}\"/' {f}",
+        f"grep -n '^PIN=' {f}",
+        f"git -C {q} add {shlex.quote(install_rel)}",
+        f"git -C {q} commit -m {shlex.quote(f'rlo guard: rlo-sdk 0.5.1 ({new[:7]}), was {old[:7]}')}",
+        f"git -C {q} push origin HEAD",
+    ]

@@ -18,7 +18,7 @@ ga-rlo doctor --install-only        # 빈 디렉터리에서도 돈다
 | 배포 | 커밋 | 무엇 |
 |---|---|---|
 | `ga-sdk` | `af904fe` | GA19: `guard_summary` state lines, `report/2` forms (GA17 `runner.guards` before it) |
-| `rlo-sdk[sensor]` | `a152e14` | stage-8. 훅 판정에 Sensor 가 필요하다 |
+| `rlo-sdk[sensor]` | `9af276f` | 0.5.1: denies malformed hook input, hints how to recover from a stale-only D. Sensor is needed for hook verdicts |
 
 ## 명령
 
@@ -26,7 +26,8 @@ ga-rlo doctor --install-only        # 빈 디렉터리에서도 돈다
 |---|---|
 | `ga-rlo init` | (G3) `ga.json` 과 rlo 모형 사본(`.ga-rlo/cc_tools_model.json`)을 쓴다. 사람이 칠 `ga-rlo permit …` 을 출력한다 |
 | `ga-rlo doctor` | (G4) 실행 전 점검. 하나라도 어긋나면 exit 1 |
-| `ga-rlo evidence` | (G2) 턴마다 rlo 의 수와 라벨(`.ga-rlo/evidence.jsonl`) |
+| `ga-rlo evidence` | (G2) per turn: ga's guard evidence (counts, deny labels, Sensor state) |
+| `ga-rlo upgrade-remote` | Prints the commands that move a remote guard's `install.sh` to the pinned rlo (runs none) |
 | `ga-rlo preset` | (G1) `runner.guards` 항목 하나 |
 | `ga-rlo <ga 하위 명령>` | (G5) `tick` · `send` · `answer` · `permit` · `post` · `prompt` · `check` · `review` · `render` · `setup` · `sandbox` 를 그대로 ga 로 넘긴다 |
 | `ga-rlo hooks …` | (G5) `python -m rlo.hooks …` 그대로. `install-hook` · `uninstall-hook` 은 `--settings` 가 있어야 하고 사람의 설정은 거절한다 |
@@ -47,13 +48,18 @@ ga-rlo doctor --install-only        # 빈 디렉터리에서도 돈다
 - matcher 는 `*` 다. ga 의 문자열 가드(bash_guard) 다음 순서로 돈다.
 - 같은 설정에 ga 의 가드 켬 · 샌드박스 `require` 가 함께 들어간다. rlo 는 도구 단위 · 상태 단위로 판정하고, 명령 내용 · 쓰는 곳은 ga 의 샌드박스 · 격리 · bash_guard 가 맡는다(P5).
 
-### 증거 (G2)
+### Evidence (G2, CMD-GR3)
 
-- ga 는 rlo 기록에서 늘어난 줄의 허락 · 거부 · 오류 수와 거부 라벨을 턴 증거(`.ga/state.json` 의 `turns[].guards`)에 싣는다. 거부가 있으면 회차 기록의 note 에 남는다. 예: `guard rlo refused 1 tool call(s) in W's CMD-W1 rev 1 turn: A1`.
-- ga_rlo 는 `send` · `tick` · `answer` 앞뒤로 그 위에 rlo 만 아는 것을 더한다. 결과는 `.ga-rlo/evidence.jsonl` 에 턴마다 한 줄이다.
-  - 판정 기록에서: DC 가 불완전했던 판정 수, 빠진 필수 상태 이름, 막힌 도구 이름.
-  - 턴의 transcript 에서: Sensor 상태의 값 이름(`execution_health` · `progress_state` · `liveness_state` · `resource_state` …). 지금(now)은 transcript 마지막 시각 + 1 초다.
-- 명령 · 까닭 글 · 도구 입력 값 · 비밀값은 어디에도 싣지 않는다.
+- The local guard command is `python -m ga_rlo.hook`: `rlo.hooks` with the same arguments and the same verdict. After
+  each PreToolUse verdict it appends `{"kind": "state", "labels": {...}}` to the rlo record: Sensor state value names
+  (`execution_health`, `progress_state`, `liveness_state`, `completion_state`, `resource_state` ...). Only labels
+  matching `[A-Za-z0-9_.:+-]{1,40}` are written; a state-line problem drops the line, never the verdict.
+- ga's own `guard_summary` (ga `af904fe`) reads the record after the turn: allow / deny / error counts, deny labels, and
+  `state` go into `turns[].guards[]` and `diag.guards[]`. A deny also lands in the round's notices, e.g.
+  `guard rlo refused 1 tool call(s) in W's CMD-W1 rev 1 turn: A1`.
+- `ga-rlo evidence` prints that per turn. The old side file `.ga-rlo/evidence.jsonl` (0.1-0.2) is retired and only
+  read for old runs.
+- No command text, argument values, reasons or secrets are written anywhere.
 
 ### 점검 (G4)
 
@@ -136,7 +142,12 @@ ga-rlo doctor --profile remote --work-repo ../well_used_gemini
   - pass: Bash, Read, the five plumbing tools, and Bash after a 2-hour idle gap followed by a Read;
   - A1: `WebFetch`, `mcp__claude-code-remote__create_session`;
   - D: Bash right after a 2-hour idle gap;
-  - fail closed: empty input, garbage input, missing model, broken model, no venv with a failing install.
+  - fail closed: empty input, garbage input, missing model, broken model, no venv with a failing install;
+  - rlo 0.5.1 itself (without the wrapper): empty and garbage input are denied (`rlo hook input error`);
+  - the D after an idle gap carries rlo's stale hint.
+- **Moving an existing guard to the pinned rlo** (e.g. amp's W1 guard at `a152e14`): `ga-rlo upgrade-remote
+  --work-repo <checkout>` prints a `sed` for the `PIN=` line and the `git add/commit/push` for a human. ga-rlo edits
+  and runs nothing. The venv marker carries the PIN, so the worker's next session start reinstalls rlo.
 - The same cases give the same results on amp's v2 files.
 
 ## 시험
@@ -148,5 +159,6 @@ python -m unittest discover -s tests      # 또는 pytest
 - 실제 모형 호출 · 네트워크가 없다. Runner 는 ga 의 진짜 헤드리스 Runner 이고, `claude` 자리에 가짜(`tests/fake_claude.py`)를 둔다.
 - 가짜는 Claude Code 처럼 턴 전용 설정의 PreToolUse 훅을 실제로 부른다. 지금 시각의 transcript 를 함께 쓴다.
 - `test_loop`(§4 2): init → 막힐 도구(WebFetch)가 든 가짜 턴 → tick. 회차 기록에 `A1` 거부 수가 남는지 본다.
+- `test_gr3` (CMD-GR3): rlo 0.5.1 pins, state lines (raw text dropped, never changes a verdict, ga carries them), `upgrade-remote` on an amp-shaped install.sh.
 - `test_remote` (CMD-GR2): the remote profile's files, its S4 replay, and mutations (plumbing dropped, each deny path turned into allow, shadow, a widened grant, a clock override, git in the guard files or run by ga-rlo).
 - `test_mutations`(§4 3): 가드 빠짐 · shadow · grant 넓어짐 · 빠짐 · 모형 넓어짐 · matcher 좁아짐 · 사람 설정 · 허브 세션 설정에 가드가 들어가면 doctor 가 잡는지 본다.

@@ -7,8 +7,11 @@ ga 는 이미 `runner.guards[].record` 의 늘어난 줄을 허락 · 거부 · 
 - 턴의 transcript 에서: Sensor 상태(실행 건강 · 정체 · 생존 · 끝남 · 자원 …)의 값 이름. 지금(now)은 transcript 의 마지막
   시각 + 1 초다 -- 벽시계로 재생하면 낡은 상태로 보여 모두 모름(D)이 된다(baseline CMD-GR1 보탬)
 
-원문(명령 · 까닭 글 · 도구 입력 값)과 비밀값은 싣지 않는다. 결과는 `<설정 디렉터리>/.ga-rlo/evidence.jsonl` 에 턴마다 한 줄이다.
-ga 의 턴 증거 칸 자체에 싣는 길은 ga 에 없다 -- 그것은 ga 쪽 요청이다(baseline#15 보고).
+원문(명령 · 까닭 글 · 도구 입력 값)과 비밀값은 싣지 않는다.
+
+CMD-GR3: the state now rides ga's own seam. The local guard (`ga_rlo.hook`) appends `{"kind": "state", "labels": ...}`
+lines to the rlo record, and ga's `guard_summary` (af904fe) puts them in `turns[].guards[].state`. The side file
+`.ga-rlo/evidence.jsonl` is retired: `read_evidence` only reads it for old runs.
 """
 from __future__ import annotations
 
@@ -92,7 +95,7 @@ def transcript_state(transcript: str | Path, model: Any, *, now_ms: float | None
         r = rs.read(entity, key)
         label = r.get("value") or r.get("status") or "UNKNOWN"
         if r.get("freshness") == "STALE":
-            label += "|STALE"
+            label += ":STALE"
         out[key] = _label(label)
     return out
 
@@ -105,98 +108,8 @@ def find_transcript(home: str | Path, session_id: str | None) -> Path | None:
     return hits[0] if hits else None
 
 
-# ---------------------------------------------------------------------------------------------- ga 명령 둘레
-
-def _line_count(path: Path) -> int:
-    try:
-        with open(path, "rb") as f:
-            return sum(1 for _ in f)
-    except OSError:
-        return 0
-
-
-class Bridge:
-    """ga 명령(턴을 열 수 있는 send · tick · answer) 앞뒤로: 앞에서 기록의 줄 수를 세고, 뒤에서 새로 생긴 턴마다 늘어난 줄과
-    그 턴의 transcript 를 줄여 `.ga-rlo/evidence.jsonl` 에 덧붙인다."""
-
-    def __init__(self, config: str | Path, ga_dir: str | Path | None = None):
-        from ga import config as gacfg
-        from ga.__main__ import make_runner
-
-        self.config_path = Path(config).resolve()
-        self.cfg = gacfg.load(self.config_path)
-        self.ga = Path(ga_dir).resolve() if ga_dir else self.config_path.parent / ".ga"
-        self.runner = make_runner(self.cfg, self.ga)
-        self.out = self.config_path.parent / preset.STATE_DIR / "evidence.jsonl"
-        found = preset.rlo_guards(self.cfg.runner)
-        self.guard_name = (found[0][1].get("name") or f"guard{found[0][0] + 1}") if found else None
-        self.model_path = found[0][2].model if found else None
-
-    def _records(self) -> dict[str, Path]:
-        if self.guard_name is None or not hasattr(self.runner, "guard_records"):
-            return {}
-        out = {}
-        for s in self.cfg.sessions:
-            for name, path in self.runner.guard_records(s):
-                if name == self.guard_name:
-                    out[s] = path
-        return out
-
-    def _turns(self) -> list[dict[str, Any]]:
-        p = self.ga / "state.json"
-        if not p.exists():
-            return []
-        return json.loads(p.read_text(encoding="utf-8")).get("turns", [])
-
-    def before(self) -> dict[str, Any]:
-        return {"turns": len(self._turns()), "lines": {s: _line_count(p) for s, p in self._records().items()}}
-
-    def after(self, snap: dict[str, Any]) -> list[dict[str, Any]]:
-        turns = self._turns()[snap["turns"]:]
-        if not turns:
-            return []
-        records = self._records()
-        model = None
-        if self.model_path:
-            try:
-                model = preset.load_model(self.model_path)
-            except Exception:  # noqa: BLE001 -- 모형이 틀리면 상태 칸만 빈다(가드는 이미 닫는 쪽으로 돌았다)
-                model = None
-        per_session: dict[str, int] = {}
-        for t in turns:
-            per_session[t["session"]] = per_session.get(t["session"], 0) + 1
-        rows = []
-        for i, t in enumerate(turns, snap["turns"]):
-            s = t["session"]
-            row: dict[str, Any] = {"schema": "ga-rlo-turn/1", "turn": i, "session": s, "directive": t.get("directive"),
-                                   "rev": t.get("rev"), "runner": t.get("runner")}
-            if s in records:
-                path = records[s]
-                try:
-                    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[snap["lines"].get(s, 0):]
-                except OSError:
-                    lines = []
-                row["guard"] = dict(record_summary(lines), guard=self.guard_name)
-                if per_session[s] > 1:
-                    row["guard"]["shared_with_turns"] = per_session[s]  # 한 명령에 같은 세션의 턴이 여럿이면 줄을 가르지 못한다
-            home = self.runner.session_home(s) if hasattr(self.runner, "session_home") else None
-            tr = find_transcript(home, t.get("session_id")) if home else None
-            if tr is not None and model is not None:
-                try:
-                    row["state"] = transcript_state(tr, model)
-                except Exception as e:  # noqa: BLE001 -- 종류만 남긴다
-                    row["state_error"] = type(e).__name__
-            elif t.get("runner") in ("headless", "agent_sdk"):
-                row["state"] = None  # transcript 를 찾지 못했다(모름)
-            rows.append(row)
-        self.out.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.out, "a", encoding="utf-8") as f:
-            for row in rows:
-                f.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
-        return rows
-
-
 def read_evidence(config: str | Path) -> list[dict[str, Any]]:
+    """Rows of the retired side file (ga_rlo 0.1-0.2), read as a fallback for old runs only (CMD-GR3 S3)."""
     p = Path(config).resolve().parent / preset.STATE_DIR / "evidence.jsonl"
     if not p.exists():
         return []

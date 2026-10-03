@@ -28,6 +28,9 @@ MODE = "enforce"
 GRANTS = ("Bash",)
 RECORD = "{home}/rlo-{session}.jsonl"
 MODEL_FILE = "cc_tools_model.json"
+# the local guard command: rlo.hooks' verdict plus Sensor state lines in the record (CMD-GR3 S3, ga_rlo/hook.py)
+HOOK_MODULE = "ga_rlo.hook"
+MODULES = ("rlo.hooks", HOOK_MODULE)
 STATE_DIR = ".ga-rlo"  # ga_rlo 가 쓰는 곳(설정 디렉터리 아래). 모형 사본 · 턴 증거
 
 
@@ -56,7 +59,7 @@ def write_model(dest: str | Path) -> Path:
 def rlo_guard(model: str | Path, *, python: str | None = None, mode: str = MODE, grants=GRANTS,
               record: str = RECORD) -> dict[str, str]:
     """ga `runner.guards` 항목 하나. python 은 rlo 가 깔린 해석기(기본: 지금 이것) -- 턴은 깨끗한 PATH 로 돈다."""
-    argv = [python or sys.executable, "-m", "rlo.hooks", "--model", str(Path(model).resolve()), "--mode", mode]
+    argv = [python or sys.executable, "-m", HOOK_MODULE, "--model", str(Path(model).resolve()), "--mode", mode]
     for g in grants:
         argv += ["--grant", g]
     argv += ["--record", record]
@@ -82,7 +85,7 @@ def is_rlo(command: str) -> bool:
         argv = shlex.split(command)
     except ValueError:
         return False
-    return any(argv[i] == "-m" and argv[i + 1] == "rlo.hooks" for i in range(len(argv) - 1))
+    return any(argv[i] == "-m" and argv[i + 1] in MODULES for i in range(len(argv) - 1))
 
 
 def parse(command: str) -> Parsed | None:
@@ -90,7 +93,7 @@ def parse(command: str) -> Parsed | None:
     if not is_rlo(command):
         return None
     argv = shlex.split(command)
-    at = next(i for i in range(len(argv) - 1) if argv[i] == "-m" and argv[i + 1] == "rlo.hooks")
+    at = next(i for i in range(len(argv) - 1) if argv[i] == "-m" and argv[i + 1] in MODULES)
     ap = argparse.ArgumentParser(add_help=False)
     ap.add_argument("--model")
     ap.add_argument("--mode", default="shadow")

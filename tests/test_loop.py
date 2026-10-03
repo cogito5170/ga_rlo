@@ -42,7 +42,15 @@ class OneRoundTest(unittest.TestCase):
         self.assertEqual(rc, 0, err)
         turn = w.state()["turns"][-1]
         self.assertEqual((turn["runner"], turn["error"], turn["sandboxed"]), ("headless", "", True))
-        self.assertEqual(turn["guards"], [{"guard": "rlo", "allow": 2, "deny": 1, "errors": 0, "labels": ["A1"]}])
+        g = turn["guards"][0]
+        self.assertEqual({k: g[k] for k in ("guard", "allow", "deny", "errors", "labels")},
+                         {"guard": "rlo", "allow": 2, "deny": 1, "errors": 0, "labels": ["A1"]})
+        # CMD-GR3 S3: Sensor state through ga's own seam (state lines in the rlo record -> guard_summary)
+        self.assertEqual(g["state"]["execution_health"], "UNRESOLVED_FAILURES")  # the blocked call is a failed result
+        self.assertEqual(g["state"]["completion_state"], "RUNNING")
+        self.assertEqual(turn["diag"]["guards"][0]["state"], g["state"])
+        rec = (w.ga / "headless" / "home" / "W" / "rlo-W.jsonl").read_text().splitlines()
+        self.assertEqual([json.loads(x)["kind"] for x in rec], ["guard", "state"] * 3)  # one state line per verdict
 
         hooks = [json.loads(x) for x in (w.ga / "headless" / "home" / "W" / "fake-hooks.jsonl").read_text().splitlines()]
         rlo = [(h["tool"], h["decision"]) for h in hooks if h["hook"] == 1]  # hook 0 is ga's bash_guard (Bash only)
@@ -62,19 +70,15 @@ class OneRoundTest(unittest.TestCase):
         self.assertEqual(rd["directives"], ["CMD-W1"])
         self.assertEqual(rd["repos"][0]["repo"], "work")
 
-        ev = [json.loads(x) for x in (w.hub / ".ga-rlo" / "evidence.jsonl").read_text().splitlines()]
-        self.assertEqual(len(ev), 1)
-        g = ev[0]["guard"]
-        self.assertEqual((g["allow"], g["deny"], g["labels"], g["denied_tools"]), (2, 1, ["A1"], ["WebFetch"]))
-        self.assertEqual(ev[0]["state"]["execution_health"], "UNRESOLVED_FAILURES")  # the blocked call is a failed result
-        self.assertEqual((ev[0]["session"], ev[0]["directive"], ev[0]["rev"]), ("W", "CMD-W1", 1))
-        everything = json.dumps(ev) + json.dumps(w.state()) + rounds[0].read_text()
+        self.assertFalse((w.hub / ".ga-rlo" / "evidence.jsonl").exists())  # the side file is retired
+        everything = json.dumps(w.state()) + rounds[0].read_text()
         for raw in ("secret-path", "token=abc", "example.invalid", "README.md", "행동 WebFetch"):  # no raw text anywhere
             self.assertNotIn(raw, everything)
 
         rc, out, _ = run_cli("--config", str(w.config), "evidence")
         self.assertIn("deny 1", out)
         self.assertIn("labels A1", out)
+        self.assertIn("execution_health=UNRESOLVED_FAILURES", out)
         self.assertEqual(bd, w.raw()["runner"]["permission"])
 
     def test_the_persons_settings_stay_untouched(self):

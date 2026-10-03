@@ -75,7 +75,7 @@ class GenerateTest(RemoteBase):
         g = guard_sh(self.repo).read_text()
         self.assertIn('REC="$HOME/.rlo/W1.jsonl"', g)
         self.assertNotIn("amp", g.lower())  # generalised: no amp-specific names
-        self.assertIn("a152e14bc84dc282f66bb3426a12a70934fc530d", (self.repo / "ops/rlo/install.sh").read_text())
+        self.assertIn("9af276f4e4864274a6414794aad55a8c1e5bcf19", (self.repo / "ops/rlo/install.sh").read_text())
 
     def test_the_model_always_has_the_plumbing(self):
         self.init()
@@ -200,7 +200,6 @@ class ReplayTest(RemoteBase):
         paths = {'deny "empty hook input"': "remote.replay.empty stdin",
                  'deny "rlo not installed and install failed"': "remote.replay.no venv, install fails",
                  'deny "model file missing"': "remote.replay.model missing",
-                 'deny "rlo exited $RC"': "remote.replay.garbage stdin",
                  'deny "rlo recorded no verdict"': "remote.replay.model broken"}
         for call, case in paths.items():
             with self.subTest(path=call):
@@ -209,9 +208,9 @@ class ReplayTest(RemoteBase):
                 self.assertIn(case, self.doctor_failed())
         g.write_text(good)
 
-    def test_non_json_output_is_denied_and_its_allow_mutation_caught(self):
-        """rlo cannot be made to print non-JSON, so a stand-in venv does: it records a line and prints garbage."""
-        fake = self.tmp / "fakevenv" / "bin"
+    def stand_in(self, body: str) -> Path:
+        """A venv whose `python -m rlo.hooks` misbehaves as real rlo 0.5.1 cannot (other calls go to this python)."""
+        fake = self.tmp / f"fakevenv{len(list(self.tmp.glob('fakevenv*')))}" / "bin"
         fake.mkdir(parents=True)
         py = fake / "python"
         py.write_text(f"""#!{sys.executable}
@@ -219,18 +218,31 @@ import os, sys
 a = sys.argv[1:]
 if a[:2] == ["-m", "rlo.hooks"]:
     sys.stdin.read()
-    open(a[a.index("--record") + 1], "a").write("{{}}\\n")
-    print("garbage")
-    sys.exit(0)
+{body}
 os.execv({sys.executable!r}, [{sys.executable!r}] + a)
 """)
         py.chmod(py.stat().st_mode | stat.S_IXUSR)
-        res = dict((n, (ok, d)) for n, ok, d in remote.replay(self.repo, fake.parent, only=["Bash after Bash"]))
-        self.assertEqual(res["Bash after Bash"][1][:60], "blocked: rlo guard (fail closed): rlo output is not JSON")
+        return fake.parent
+
+    def guard_detail(self, venv: Path) -> str:
+        return dict((n, d) for n, ok, d in remote.replay(self.repo, venv, only=["Bash after Bash"]))["Bash after Bash"]
+
+    def test_wrapper_only_paths_and_their_allow_mutations(self):
+        """Two deny paths real rlo 0.5.1 no longer reaches (it exits 0 and prints JSON on every input): a stand-in
+        rlo reaches them, the good guard denies, and the mutant (deny -> exit 0) lets the call through."""
+        paths = {'deny "rlo output is not JSON"':
+                 ('    open(a[a.index("--record") + 1], "a").write("{}\\n")\n    print("garbage")\n    sys.exit(0)',
+                  "rlo output is not JSON"),
+                 'deny "rlo exited $RC"': ("    sys.exit(3)", "rlo exited 3")}
         g = guard_sh(self.repo)
-        g.write_text(g.read_text().replace('deny "rlo output is not JSON"', "exit 0"))
-        res = dict((n, (ok, d)) for n, ok, d in remote.replay(self.repo, fake.parent, only=["Bash after Bash"]))
-        self.assertEqual(res["Bash after Bash"][1], "not blocked")  # the mutant lets it through: the check above kills it
+        good = g.read_text()
+        for call, (body, reason) in paths.items():
+            with self.subTest(path=call):
+                venv = self.stand_in(body)
+                self.assertEqual(self.guard_detail(venv), f"blocked: rlo guard (fail closed): {reason}")
+                g.write_text(good.replace(call, "exit 0"))
+                self.assertEqual(self.guard_detail(venv), "not blocked")  # the mutant: the assertion above kills it
+                g.write_text(good)
 
 
 class NoGitTest(RemoteBase):

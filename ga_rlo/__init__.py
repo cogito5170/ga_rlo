@@ -5,6 +5,7 @@
     init     G3  `ga-rlo init`
     doctor   G4  `ga-rlo doctor`
     cli      G5  `ga-rlo` 한 입구
+    hook     CMD-GR3  the local guard command: rlo.hooks + Sensor state lines in the record
     remote   CMD-GR2  the guard as project settings for a remote worker (`init/doctor --profile remote`)
 """
-__version__ = "0.2.0"
+__version__ = "0.3.0"

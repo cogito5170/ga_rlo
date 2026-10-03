@@ -15,7 +15,10 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def _req(s: str) -> tuple:
-    from packaging.requirements import Requirement
+    try:
+        from packaging.requirements import Requirement
+    except ImportError:  # a clean venv may have no packaging; pip carries one
+        from pip._vendor.packaging.requirements import Requirement
 
     r = Requirement(s)
     return (r.name.lower().replace("_", "-"), tuple(sorted(r.extras)), str(r.specifier), r.url, str(r.marker or ""))

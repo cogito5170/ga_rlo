@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ga-rlo"
-version = "0.3.0"
+version = "0.4.0"
 description = "ga-SDK 와 rlo-SDK 를 한 입구로 -- 결합층(두 SDK 를 고정 판으로 의존하고 잇는 코드만 가진다)"
 readme = "README.md"
 requires-python = ">=3.10"
 # 판 목록의 원본은 ga_rlo/_pins.py 다. 이 목록은 그것과 뜻이 같아야 한다(tests/test_pins.py).
 dependencies = [
     "ga-sdk @ git+https://github.com/cogito5170/ga-SDK@af904fe7fe1a0da2ef817ca981422040cccc0718",
-    "rlo-sdk[sensor] @ git+https://github.com/cogito5170/rlo-SDK@9af276f4e4864274a6414794aad55a8c1e5bcf19",
+    "rlo-sdk[sensor] @ git+https://github.com/cogito5170/rlo-SDK@3323f88741c198f453370936c481c00fbd26d398",
 ]
 
 [project.scripts]

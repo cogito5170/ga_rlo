@@ -85,29 +85,16 @@ MEASURED_PARAMS = {
 MEASURED_SPECS = [_spec("Glob", "read", {"pattern": {"type": "string"}, "path": _opt("string")}, "Find files (read only).")]
 
 
-def substitutes_supported() -> bool:
-    """Does the installed rlo / action contract read an action-model with 'substitutes' (rlo K11)? rlo 0.5.1 does not:
-    it rejects the whole model, and a fail-closed guard would then deny every call. So the map is written only when
-    this is True (doctor also checks install.sh pins the same rlo)."""
-    try:
-        from action.spec import ActionModel
-
-        ActionModel.from_dict({"schema": "action-model/1", "version": "probe", "specs": [], "substitutes": {}})
-        return True
-    except Exception:  # noqa: BLE001
-        return False
-
-
-def model(name: str = "worker", substitutes: bool | None = None) -> dict[str, Any]:
-    """rlo's start model + W1's measured fields + plumbing. Always has every PLUMBING tool (S2).
-    With ``substitutes`` (default: when the installed rlo reads them), the SUBSTITUTES map (CMD-GR4 S1)."""
+def model(name: str = "worker", substitutes: bool = True) -> dict[str, Any]:
+    """rlo's start model + W1's measured fields + plumbing (always every PLUMBING tool, GR2 S2) + the SUBSTITUTES map
+    (GR4 S1). rlo >= 0.6.0 (K11) reads 'substitutes' beside action-model/1 and splits it off; install.sh pins it."""
     m = json.loads(preset.packaged_model().read_text(encoding="utf-8"))
     for s in m["specs"]:
         s["params"].update(MEASURED_PARAMS.get(s["name"], {}))
     have = {s["name"] for s in m["specs"]}
     m["specs"] += [json.loads(json.dumps(s)) for s in MEASURED_SPECS + PLUMBING if s["name"] not in have]
     m["version"] = f"ga-rlo-remote-1:{name}"
-    if substitutes if substitutes is not None else substitutes_supported():
+    if substitutes:
         m["substitutes"] = json.loads(json.dumps(SUBSTITUTES))
     return m
 
@@ -308,8 +295,8 @@ def _ts(ms: float) -> str:
     return datetime.fromtimestamp(ms / 1000, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
-def transcript(steps: list[tuple[str, dict, bool, float]], path: Path) -> None:
-    """A Claude Code transcript at real times. steps: (tool, input, ok, at unix ms)."""
+def transcript(steps: list[tuple], path: Path) -> None:
+    """A Claude Code transcript at real times. steps: (tool, input, ok, at unix ms[, result text])."""
     lines, n = [], 0
 
     def add(kind: str, at: float, **kw: Any) -> None:
@@ -319,12 +306,13 @@ def transcript(steps: list[tuple[str, dict, bool, float]], path: Path) -> None:
 
     start = (steps[0][3] if steps else time.time() * 1000) - 1000
     add("user", start, message={"role": "user", "content": "go"})
-    for i, (tool, inp, ok, at) in enumerate(steps):
+    for i, (tool, inp, ok, at, *text) in enumerate(steps):
         add("assistant", at, message={"id": f"m{i}", "model": "replay", "role": "assistant", "stop_reason": "tool_use",
                                       "usage": {"input_tokens": 1, "output_tokens": 1},
                                       "content": [{"type": "tool_use", "id": f"t{i}", "name": tool, "input": inp}]})
         add("user", at + 500, toolUseResult={}, message={"role": "user", "content": [
-            {"type": "tool_result", "tool_use_id": f"t{i}", "content": [{"type": "text", "text": "x"}], "is_error": not ok}]})
+            {"type": "tool_result", "tool_use_id": f"t{i}", "content": [{"type": "text", "text": text[0] if text else "x"}],
+             "is_error": not ok}]})
     path.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
 
 
@@ -353,25 +341,67 @@ class Case:
     setup: str = ""  # "no-model" | "bad-model" | "no-venv"
     direct: bool = False  # call rlo.hooks itself, not guard.sh (rlo 0.5.1 closes on malformed input on its own)
     hint: bool = False  # the deny must carry rlo's stale-only hint (rlo 0.5.1)
+    react: dict | None = None  # these fields of the deny's '-- react: {json}' line (rlo 0.6.0, K11; GR4 S3)
+    grants: tuple | None = None  # direct calls only: grants other than the preset's
+
+
+def _deny_text(rule: str, cause: str, kind: str, attempt: int, **extra: Any) -> str:
+    """What an earlier deny left in the transcript: its reason ends with the react line (rlo counts these)."""
+    obj = {"kind": kind, "rule": rule, "cause": cause, "attempt": attempt, "of": 2, "escalate": kind == "report", **extra}
+    return f"guard DENY({rule}): earlier deny\n-- react: " + json.dumps(obj, sort_keys=True, separators=(",", ":"))
 
 
 def cases() -> list[Case]:
     ok = [(BASH[0], BASH[1], True, 5000)]
+    report = {"kind": "report", "escalate": True}
     out = [Case("Bash first call", [], BASH, "pass"), Case("Bash after Bash", ok, BASH, "pass"),
            Case("Read", ok, READ, "pass")]
     out += [Case(f"plumbing {t}", ok, (t, i), "pass") for t, i in PLUMBING_CALLS]
-    out += [Case(f"A1 {t}", ok, (t, i), "A1") for t, i in DENY_A1]
+    # W1 case 4 (and create_session): no substitute -> report, escalate
+    out += [Case(f"A1 {t}", ok, (t, i), "A1", react=dict(report, rule="A1", cause="no_substitute")) for t, i in DENY_A1]
     gap = [(BASH[0], BASH[1], True, IDLE_MS)]
-    out += [Case("Bash after 2h idle", gap, BASH, "D", hint=True),
+    # W1 case 2: stale-only D -> refresh_read; after one read the call passes
+    out += [Case("Bash after 2h idle", gap, BASH, "D", hint=True,
+                 react={"kind": "refresh_read", "rule": "D", "cause": "stale", "attempt": 1, "escalate": False}),
             Case("Bash after 2h idle, then Read", gap + [(READ[0], READ[1], True, 2000)], BASH, "pass")]
+    # W1 case 1: the W1 v1 model had no ReadNotifications -> A1, use_tool issue_read from the substitutes map
+    rn = ("ReadNotifications", {})
+    use = {"kind": "use_tool", "rule": "A1", "cause": "has_substitute", "tool": "mcp__github__issue_read"}
+    out += [Case("W1 v1 model: ReadNotifications", ok, rn, "A1", setup="w1-v1",
+                 react=dict(use, attempt=1, escalate=False))]
+    # the retry cap: the same deny once before -> attempt 2; twice before -> the 3rd escalates (report)
+    before = [(rn[0], rn[1], False, 4000 - 1000 * k, _deny_text("A1", "has_substitute", "use_tool", k + 1,
+                                                               tool="mcp__github__issue_read")) for k in range(2)]
+    out += [Case("W1 v1 model: ReadNotifications, denied once before", ok + before[:1], rn, "A1", setup="w1-v1",
+                 react=dict(use, attempt=2, escalate=False)),
+            Case("W1 v1 model: ReadNotifications, denied twice before", ok + before, rn, "A1", setup="w1-v1",
+                 react=dict(report, rule="A1", cause="has_substitute", attempt=3))]
+    # W1 case 3: an external tool without its grant -> A7, report, escalate (rlo itself with one grant fewer)
+    sm = ("mcp__claude-code-remote__send_message", {"session_id": "session_x", "message": "{}"})
+    out += [Case("A7 send_message without its grant", ok, sm, "A7", direct=True,
+                 grants=tuple(g for g in GRANTS if g != sm[0]), react=dict(report, rule="A7", cause="not_granted"))]
     out += [Case("empty stdin", [], BASH, "fail-closed", stdin=""),
             Case("garbage stdin", [], BASH, "fail-closed", stdin="not json"),
             Case("model missing", ok, BASH, "fail-closed", setup="no-model"),
             Case("model broken", ok, BASH, "fail-closed", setup="bad-model"),
             Case("no venv, install fails", ok, BASH, "fail-closed", setup="no-venv"),
-            Case("rlo itself: empty stdin", [], BASH, "input-error", stdin="", direct=True),
-            Case("rlo itself: garbage stdin", [], BASH, "input-error", stdin="not json", direct=True)]
+            Case("rlo itself: empty stdin", [], BASH, "input-error", stdin="", direct=True,
+                 react=dict(report, rule="input", cause="malformed_input")),
+            Case("rlo itself: garbage stdin", [], BASH, "input-error", stdin="not json", direct=True,
+                 react=dict(report, rule="input", cause="malformed_input"))]
     return out
+
+
+def react_of(reason: str) -> dict | None:
+    """The '-- react: {json}' line of a deny reason (rlo 0.6.0), or None."""
+    for line in reason.splitlines():
+        if line.strip().startswith("-- react: "):
+            try:
+                obj = json.loads(line.strip()[len("-- react: "):])
+            except ValueError:
+                return None
+            return obj if isinstance(obj, dict) else None
+    return None
 
 
 def replay(repo: str | Path, venv: str | Path, *, guard_rel: str = f"{GUARD_DIR}/guard.sh",
@@ -392,19 +422,23 @@ def replay(repo: str | Path, venv: str | Path, *, guard_rel: str = f"{GUARD_DIR}
             home.mkdir()
             project = repo
             v = str(venv)
-            if c.setup in ("no-model", "bad-model"):
+            if c.setup in ("no-model", "bad-model", "w1-v1"):
                 project = tmp / f"proj{len(res)}"
                 shutil.copytree(repo / Path(guard_rel).parent, project / Path(guard_rel).parent)
                 m = project / model_rel
                 if c.setup == "no-model":
                     m.unlink()
-                else:
+                elif c.setup == "bad-model":
                     m.write_text("{}", encoding="utf-8")
+                else:  # the model W1 ran with first (amp 714c00b): no ReadNotifications, the substitutes map kept
+                    d = json.loads(m.read_text(encoding="utf-8"))
+                    d["specs"] = [x for x in d["specs"] if x["name"] != "ReadNotifications"]
+                    m.write_text(json.dumps(d), encoding="utf-8")
             if c.setup == "no-venv":
                 v = "/dev/null/ga-rlo-no-venv"
             now = time.time() * 1000
             tpath = tmp / f"t{len(res)}.jsonl"
-            transcript([(t, i, ok, now - ago) for t, i, ok, ago in c.steps], tpath)
+            transcript([(t, i, ok, now - ago, *rest) for t, i, ok, ago, *rest in c.steps], tpath)
             data = {"session_id": "replay", "transcript_path": str(tpath), "cwd": str(project),
                     "permission_mode": "default", "hook_event_name": "PreToolUse", "tool_name": c.call[0],
                     "tool_input": c.call[1], "tool_use_id": "current"}
@@ -413,7 +447,8 @@ def replay(repo: str | Path, venv: str | Path, *, guard_rel: str = f"{GUARD_DIR}
             argv = ["bash", str(project / guard_rel)]
             if c.direct:  # rlo.hooks as guard.sh calls it, without the wrapper's own checks
                 argv = [str(Path(v) / "bin" / "python"), "-m", "rlo.hooks", "--model", str(project / model_rel),
-                        "--mode", "enforce", *[x for g in GRANTS for x in ("--grant", g)], "--record", str(home / "rec.jsonl")]
+                        "--mode", "enforce", *[x for g in (GRANTS if c.grants is None else c.grants) for x in ("--grant", g)],
+                        "--record", str(home / "rec.jsonl")]
             try:
                 p = subprocess.run(argv, input=json.dumps(data) if c.stdin is None else c.stdin,
                                    capture_output=True, text=True, env=env, timeout=300)
@@ -427,22 +462,29 @@ def replay(repo: str | Path, venv: str | Path, *, guard_rel: str = f"{GUARD_DIR}
                 continue
             hso = out.get("hookSpecificOutput") or {}
             dec, why = hso.get("permissionDecision"), hso.get("permissionDecisionReason", "")
+            first = why.splitlines()[0] if why else ""  # details show the reason's first line, not the react line
             if p.returncode != 0:
                 ok, detail = False, f"exit {p.returncode}: Claude Code would let the call through"
             elif dec == "allow" or str(out.get("decision", "")).lower() in ("allow", "approve"):
                 ok, detail = False, "the guard said allow (P3)"
             elif c.want == "pass":
-                ok, detail = dec is None, "not blocked" if dec is None else f"blocked: {why[:90]}"
+                ok, detail = dec is None, "not blocked" if dec is None else f"blocked: {first[:90]}"
             elif c.want in ("fail-closed", "input-error"):
                 marks = ("rlo hook input error",) if c.want == "input-error" else ("fail closed", "rlo hook input error")
                 ok = dec == "deny" and any(m in why for m in marks)
-                detail = why[:90] if dec else "not denied: a fail-closed path lets the call through"
+                detail = first[:90] if dec else "not denied: a fail-closed path lets the call through"
             else:
                 ok = dec == "deny" and f"({c.want})" in why
-                detail = f"denied {c.want}" if ok else f"not denied by {c.want}: {(why or 'no decision')[:80]}"
+                detail = f"denied {c.want}" if ok else f"not denied by {c.want}: {(first or 'no decision')[:80]}"
                 if ok and c.hint:
                     ok = STALE_HINT_MARK in why
                     detail += " with the stale hint" if ok else " but without the stale hint (rlo < 0.5.1?)"
+            if ok and c.react is not None:
+                got = react_of(why) or {}
+                off = {k: got.get(k) for k, v in c.react.items() if got.get(k) != v}
+                ok = not off
+                shown = ",".join(f"{k}={got.get(k)}" for k in ("kind", "tool", "attempt", "escalate") if k in got)
+                detail = f"{detail}; react {shown}" if ok else f"react off: want {c.react}, got {got or 'no react line'}"
             res.append((c.name, ok, detail))
     return res
 
@@ -489,9 +531,6 @@ def problems(repo: str | Path) -> list[str]:
     try:
         mdl = json.loads((repo / GUARD_DIR / "model.json").read_text(encoding="utf-8"))
         out += substitute_problems(mdl)
-        if "substitutes" in mdl and not substitutes_supported():
-            out.append("model.json: has substitutes, which the installed rlo cannot read (every call would be denied)")
-            return out
         preset.load_model(repo / GUARD_DIR / "model.json")
         specs = {s["name"]: s for s in mdl["specs"]}
         for p in PLUMBING:

@@ -42,8 +42,10 @@ def packaged_model() -> Any:
 def load_model(path: str | Path) -> Any:
     """`action-model/1` 로 읽는다(틀리면 예외). 틀린 모형을 걸면 enforce 의 모든 PreToolUse 가 막힌다."""
     from action.spec import ActionModel
+    from rlo.react import split_model  # rlo >= 0.6.0: 'substitutes' sits beside action-model/1 (K11)
 
-    return ActionModel.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
+    model, _ = split_model(json.loads(Path(path).read_text(encoding="utf-8")))
+    return ActionModel.from_dict(model)
 
 
 def write_model(dest: str | Path) -> Path:

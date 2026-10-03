@@ -8,4 +8,4 @@
     hook     CMD-GR3  the local guard command: rlo.hooks + Sensor state lines in the record
     remote   CMD-GR2  the guard as project settings for a remote worker (`init/doctor --profile remote`)
 """
-__version__ = "0.3.0"
+__version__ = "0.4.0"

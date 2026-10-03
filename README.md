@@ -18,7 +18,7 @@ ga-rlo doctor --install-only        # 빈 디렉터리에서도 돈다
 | 배포 | 커밋 | 무엇 |
 |---|---|---|
 | `ga-sdk` | `af904fe` | GA19: `guard_summary` state lines, `report/2` forms (GA17 `runner.guards` before it) |
-| `rlo-sdk[sensor]` | `9af276f` | 0.5.1: denies malformed hook input, hints how to recover from a stale-only D. Sensor is needed for hook verdicts |
+| `rlo-sdk[sensor]` | `3323f88` | 0.6.0: every deny ends with `-- react: {json}` (one closed alternative, retry cap, escalate); reads `substitutes` beside the model. 0.5.1 before it: denies malformed input, stale-only D hint |
 
 ## 명령
 
@@ -146,9 +146,13 @@ ga-rlo doctor --profile remote --work-repo ../well_used_gemini
   - fail closed: empty input, garbage input, missing model, broken model, no venv with a failing install;
   - rlo 0.5.1 itself (without the wrapper): empty and garbage input are denied (`rlo hook input error`);
   - the D after an idle gap carries rlo's stale hint.
+  - the react object of each deny (rlo 0.6.0, CMD-GR4), W1's four cases: ReadNotifications on the W1 v1 model ->
+    `use_tool mcp__github__issue_read`; stale D -> `refresh_read`; an ungranted external tool (A7) -> `report`,
+    escalate; WebFetch (no substitute) -> `report`, escalate. The same deny once before -> attempt 2; twice before ->
+    the third escalates.
 - **Substitutes (CMD-GR4, rlo K11):** `model.json` gets `"substitutes": {"ReadNotifications": ["mcp__github__issue_read"]}`
   (same purpose, already in the model; never for `WebFetch`, `Agent` or `create_session`; never an ungranted external
-  tool). It is written only when the installed rlo reads it: rlo 0.5.1 rejects the key and would deny every call.
+  tool). rlo 0.6.0 reads it beside action-model/1 (`rlo.react.split_model`); the PIN check keeps the worker on it.
 - **Moving an existing guard to the pinned rlo** (e.g. amp's W1 guard at `a152e14`): `ga-rlo upgrade-remote
   --work-repo <checkout>` prints a `sed -i.bak … && rm ….bak` for the `PIN=` line (GNU and macOS sed alike) and the `git add/commit/push` for a human. ga-rlo edits
   and runs nothing. The venv marker carries the PIN, so the worker's next session start reinstalls rlo.

@@ -3,7 +3,7 @@
 `pyproject.toml` 의 dependencies 는 이 목록과 뜻이 같아야 한다(tests/test_pins.py 가 붙든다).
 
     ga-sdk   af904fe  GA19 (guard_summary state lines, report/2 forms; GA17 runner.guards before it)
-    rlo-sdk  9af276f  0.5.1: denies malformed hook input, hints on stale-only D (BD-200/201); extras [sensor]
+    rlo-sdk  3323f88  0.6.0: in-turn ReAct (K11, BD-211) -- a react line per deny, substitutes beside the model; 0.5.1 closes on bad input; extras [sensor]
 
 두 SDK 를 한 venv 에 깔았을 때 충돌이 없다(baseline 확인, 2026-10-03, `pip check` 정상).
 """
@@ -14,7 +14,7 @@ _GH = "https://github.com/cogito5170/"
 # 이름 -> (배포 이름, extras, 저장소 URL, 커밋 sha)
 PINS = {
     "ga": ("ga-sdk", (), _GH + "ga-SDK", "af904fe7fe1a0da2ef817ca981422040cccc0718"),
-    "rlo": ("rlo-sdk", ("sensor",), _GH + "rlo-SDK", "9af276f4e4864274a6414794aad55a8c1e5bcf19"),
+    "rlo": ("rlo-sdk", ("sensor",), _GH + "rlo-SDK", "3323f88741c198f453370936c481c00fbd26d398"),
 }
 
 

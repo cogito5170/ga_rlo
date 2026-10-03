@@ -75,7 +75,7 @@ class GenerateTest(RemoteBase):
         g = guard_sh(self.repo).read_text()
         self.assertIn('REC="$HOME/.rlo/W1.jsonl"', g)
         self.assertNotIn("amp", g.lower())  # generalised: no amp-specific names
-        self.assertIn("9af276f4e4864274a6414794aad55a8c1e5bcf19", (self.repo / "ops/rlo/install.sh").read_text())
+        self.assertIn("3323f88741c198f453370936c481c00fbd26d398", (self.repo / "ops/rlo/install.sh").read_text())
 
     def test_the_model_always_has_the_plumbing(self):
         self.init()
